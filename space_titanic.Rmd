@@ -1,0 +1,777 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+rm(list = ls())
+```
+
+Load and check data
+
+```{r}
+# Load packages
+library('ggplot2') # visualization
+library('ggthemes') # visualization
+library('scales') # visualization
+library('dplyr') # data manipulation
+library('mice') # imputation
+library('randomForest') # classification algorithm
+```
+
+
+Now that our packages are loaded, let’s read in and take a peek at the data.
+
+```{r}
+train <- read.csv('train.csv', stringsAsFactors = F, encoding = 'UTF-8', na.strings = c('', 'NA', NULL))
+test  <- read.csv('test.csv', stringsAsFactors = F, encoding = 'UTF-8', na.strings = c('', 'NA', NULL))
+full  <- bind_rows(train, test) # bind training & test data
+```
+
+#PassengerId - A unique Id for each passenger. Each Id takes the form gggg_pp where gggg indicates a group the passenger is travelling with and pp is their number within the group. People in a group are often family members, but not always.
+
+#HomePlanet - The planet the passenger departed from, typically their planet of permanent residence.
+
+#CryoSleep - Indicates whether the passenger elected to be put into suspended animation for the duration of the voyage. Passengers in cryosleep are confined to their cabins.
+
+#Cabin - The cabin number where the passenger is staying. Takes the form deck/num/side, where side can be either P for Port or S for Starboard.
+
+#Destination - The planet the passenger will be debarking to.
+
+#Age - The age of the passenger.
+
+#VIP - Whether the passenger has paid for special VIP service during the voyage.
+
+#RoomService, FoodCourt, ShoppingMall, Spa, VRDeck - Amount the passenger has billed at each of the Spaceship Titanic's many luxury amenities.
+
+#Name - The first and last names of the passenger.
+
+#Transported - Whether the passenger was transported to another dimension. This is the target, the column you are trying to predict.
+
+```{r}
+# check data
+str(full)
+```
+
+```{r}
+summary(full)
+```
+
+#Feature Engineering
+
+#Gonna make a new column with just the surname
+```{r}
+full$Surname <- gsub('.* ', '', full$Name)
+head(full$Surname)
+```
+#Success!
+
+#PassengerId - A unique Id for each passenger. Each Id takes the form gggg_pp where gggg indicates a group the passenger is travelling with and pp is their number within the group. People in a group are often family members, but not always.
+
+#Gonna make a groupnumber column and a number within group column!
+```{r}
+full$Group <- as.numeric(gsub('_.*', '', full$PassengerId))
+full$Num_in_group <- as.numeric(gsub('.*_', '', full$PassengerId))
+
+head(full[,c('Group', 'Num_in_group')])
+```
+
+#Cabin - The cabin number where the passenger is staying. Takes the form deck/num/side, where side can be either P for Port or S for Starboard.
+
+#Gonna make 3 difference columns of the Cabin column.
+```{r}
+full$Deck <- sub('/.*', '', full$Cabin) #Success
+full$Cabin_side <- gsub('(.*/)|(/.*)', '', full$Cabin) #"|" means what i want in the middle
+#NVM i accidentaly got side from this
+
+
+library(stringr)
+
+full$Cabin_num <- str_extract(full$Cabin, "(?<=/).*?(?=/)") #OMG I DID IT
+#I GOT IT FROM THE MIDDLE!!
+#https://stackoverflow.com/questions/56452306/how-to-extract-the-middle-part-of-a-string-in-a-data-frame-in-r
+```
+
+
+```{r}
+full$Cabin_num <- as.numeric(full$Cabin_num)
+str(full)
+```
+
+#Now i wanna create factor variables (Category variables)
+
+```{r}
+# Make variables factors into factors
+factor_vars <- c('HomePlanet','CryoSleep','Destination','VIP', 
+                 'Transported','Surname','Deck','Cabin_side')
+
+full[factor_vars] <- lapply(full[factor_vars], function(x) as.factor(x))
+```
+
+
+```{r}
+str(full)
+```
+
+#Gonna make a new column that counts how many of that particular Surname exists in dataset
+```{r}
+hmm <- full %>%
+  group_by(Surname) %>%
+  summarise(Totalsur = length(Surname))
+
+tmp <- merge(full, hmm, by = "Surname") #This is a join in SQL
+
+tmp[tmp$Totalsur > 200, 'Totalsur'] <- NA
+
+full <- tmp
+
+remove(tmp) #I DID IT!!
+```
+
+#PassengerId - A unique Id for each passenger. Each Id takes the form gggg_pp where gggg indicates a group the passenger is travelling with and pp is their number within the group. People in a group are often family members, but not always.
+
+#Gonna make one "is probably family" variable, if they have the same surname and are in the same group.
+```{r}
+hmm <- full %>% #First im gonna make a how many is in the group count
+  group_by(Group) %>%
+  summarise(Totalgrp = length(Group))
+
+tmp <- merge(full, hmm, by = "Group") #Detta är typ en join som jag körde
+
+full <- tmp
+
+remove(tmp)
+```
+
+```{r}
+hmm <- full %>% #Score!
+  group_by(Group, Surname) %>%
+  summarise(Probtotfam = length(Surname))
+
+# Create a group_surname variable to be able to join successfully 
+full$Group_surname <- paste(full$Group, full$Surname, sep='_')
+
+# Create a group_surname variable to be able to join successfully 
+hmm$Group_surname <- paste(hmm$Group, hmm$Surname, sep='_')
+
+hmm <- hmm[,c("Group_surname", "Probtotfam")]
+
+tmp <- merge(full, hmm, by = "Group_surname") #Detta är typ en join som jag kör
+
+full <- tmp
+
+remove(tmp)
+remove(hmm)
+```
+
+#Taking another look at the data!
+
+```{r}
+summary(full)
+```
+
+#Creating a how many in this cabin column
+```{r}
+hmm <- full %>%
+  group_by(Cabin) %>%
+  summarise(Tot_cabin_ppl = length(Cabin))
+
+tmp <- merge(full, hmm, by="Cabin")
+
+full <- tmp
+
+remove(tmp)
+remove(hmm)
+```
+
+
+#Looking through the data, it seems that those that are in the same cabin has the same homeplanet, good for fixing NA values for homeplanet!
+```{r}
+hmm <- full %>%
+  group_by(Cabin) %>%
+  summarise(length(HomePlanet), length(Cabin))
+
+uhh <- full[!is.na(full$Cabin) & !is.na(full$HomePlanet),c('Cabin', 'HomePlanet')]
+
+thinking <- merge(hmm, uhh, by='Cabin')
+jeez <- thinking[!duplicated(thinking),] #Remove duplicates
+
+jeez <- jeez %>%
+  mutate(HomePlanet_2 = HomePlanet)
+
+jeez <- jeez[,c('Cabin', 'HomePlanet_2')]
+
+
+tmp <- left_join(full, jeez, by = c("Cabin"="Cabin"))#Need to leftjoin
+
+full <- tmp
+
+```
+
+
+```{r}
+remove(tmp)
+remove(jeez)
+remove(thinking)
+remove(hmm)
+remove(uhh)
+```
+
+
+```{r}
+full[is.na(full$HomePlanet) & !is.na(full$Cabin), 'HomePlanet'] <- 
+  full[is.na(full$HomePlanet) & !is.na(full$Cabin), 'HomePlanet_2']
+```
+
+#Lets see if it worked!
+```{r}
+summary(full$HomePlanet) # I think it worked a little bit atleast?
+#from 288NA's to 189
+```
+
+```{r}
+full[is.na(full$HomePlanet) & !is.na(full$Cabin),]
+```
+
+
+```{r}
+full[full$Group==8322,]
+```
+```{r}
+#Fixing this NA
+full[full$PassengerId =='8322_02', 'HomePlanet'] <- 'Europa'
+```
+
+#Checking for more easy NA fixes.
+```{r}
+full[is.na(full$HomePlanet) & !is.na(full$Cabin) & full$Probtotfam > 1,] #Not sure how to fix this maybe group by group_surname and get that HomePlanet?
+```
+
+#Here i am clumping togheter so everyone that is in the same group and has the same surname
+#gets the same HomePlanet, this is to fix some NAs
+```{r}
+hmm <- full %>%
+  group_by(Group_surname) %>%
+  summarise(length(HomePlanet), length(Group_surname))
+
+uhh <- full[!is.na(full$Group_surname) & !is.na(full$HomePlanet),
+            c('Group_surname', 'HomePlanet')]
+
+thinking <- merge(hmm, uhh, by='Group_surname')
+jeez <- thinking[!duplicated(thinking),] #Remove duplicates
+
+jeez <- jeez %>%
+  mutate(HomePlanet_3 = HomePlanet)
+
+jeez <- jeez[,c('Group_surname', 'HomePlanet_3')]
+
+
+tmp <- left_join(full, jeez, by = c("Group_surname"="Group_surname"))#Need to leftjoin
+
+full <- tmp
+```
+
+
+```{r}
+full[is.na(full$HomePlanet) & !is.na(full$Group_surname), 'HomePlanet'] <- 
+  full[is.na(full$HomePlanet) & !is.na(full$Group_surname), 'HomePlanet_3']
+```
+
+
+```{r}
+summary(full$HomePlanet) #Got some less NAs
+```
+
+```{r}
+remove(tmp)
+remove(jeez)
+remove(thinking)
+remove(hmm)
+remove(uhh)
+```
+
+#Checking if i can see anymore ways to fix homeplanet NAs
+
+```{r}
+inspect <- full[is.na(full$HomePlanet),]
+#View(inspect) #Doesnt seem like it, could check if there is some connection with Deck and homeplanet
+remove(inspect)
+```
+
+#Time to plot stuff, to maybe get a feel!
+```{r}
+ggplot(data = full, aes(x = c(Deck), fill = factor(HomePlanet))) +
+  geom_bar() +
+  theme_few()
+```
+
+#Looks like we can fix some more NAs!!
+
+```{r}
+full[full$Deck %in% 'G' & is.na(full$HomePlanet), 'HomePlanet'] <- 'Earth'
+#woah you have to use %in% when you want to convert NAs
+
+full[full$Deck %in% 'A' & is.na(full$HomePlanet), 'HomePlanet'] <- 'Europa'
+#woah you have to use %in% when you want to convert NAs
+full[full$Deck %in% 'B' & is.na(full$HomePlanet), 'HomePlanet'] <- 'Europa'
+#woah you have to use %in% when you want to convert NAs
+full[full$Deck %in% 'C' & is.na(full$HomePlanet), 'HomePlanet'] <- 'Europa'
+#woah you have to use %in% when you want to convert NAs
+```
+
+#Lets see if there is some connection with Destination and homeplanet!
+```{r}
+ggplot(data = full, aes(x = Destination, fill = factor(HomePlanet))) +
+  geom_bar() +
+  theme_few()
+```
+
+#Looks like we can fix some more NAs!!
+#We can be pretty sure those who goes to PSO are from Earth
+
+```{r}
+full[full$Destination %in% 'PSO J318.5-22' & is.na(full$HomePlanet), 'HomePlanet'] <- 'Earth'
+#woah you have to use %in% when you want to convert NAs
+```
+
+
+#Lets see how many NAs we have left now
+
+```{r}
+summary(full$HomePlanet)
+```
+
+#Lets see if there is any connection with Cabin side and HomePlanet!
+
+```{r}
+ggplot(data = full, aes(x = Destination, fill = factor(Cabin_side))) +
+  geom_bar() +
+  theme_few()
+```
+#Nope! Taking one more look at the NAs!
+
+```{r}
+full[is.na(full$HomePlanet),]
+```
+#I think we now can assume that those in the same group has the same HomePlanet!
+
+```{r}
+full[full$Group == '64',]
+```
+
+
+```{r}
+hmm <- full %>%
+  group_by(Group) %>%
+  summarise(length(HomePlanet), length(Group))
+
+uhh <- full[!is.na(full$Group) & !is.na(full$HomePlanet),c('Group', 'HomePlanet')]
+
+thinking <- merge(hmm, uhh, by='Group')
+jeez <- thinking[!duplicated(thinking),] #Remove duplicates
+
+jeez <- jeez %>%
+  mutate(HomePlanet_4 = HomePlanet)
+
+jeez <- jeez[,c('Group', 'HomePlanet_4')]
+
+
+tmp <- left_join(full, jeez, by = c("Group"="Group"))#Need to leftjoin
+
+full <- tmp
+```
+
+```{r}
+full[is.na(full$HomePlanet) & !is.na(full$Group), 'HomePlanet'] <- 
+  full[is.na(full$HomePlanet) & !is.na(full$Group), 'HomePlanet_4']
+```
+
+```{r}
+remove(tmp)
+remove(jeez)
+remove(thinking)
+remove(hmm)
+remove(uhh)
+```
+
+```{r}
+summary(full$HomePlanet)
+```
+#Even less NA's!
+#Lets leave this for now and take a look at destination NAs!
+
+```{r}
+summary(full$Destination)
+```
+
+```{r}
+#View(full[,c('Group', 'Destination')])
+```
+
+#Destination and group doesnt seem to correlate...
+
+#Lets try and plot out if destination has anything to do with homeplanet!
+```{r}
+ggplot(data = full, aes(x = HomePlanet, fill = factor(Destination))) +
+  geom_bar() +
+  theme_few()
+```
+#Hm i think we can assume here that the missing destination values from Mars goes to TRAPPIST-1e
+```{r}
+full[is.na(full$Destination) & full$HomePlanet %in% 'Mars', 'Destination'] <- 'TRAPPIST-1e'
+```
+
+
+```{r}
+summary(full$Destination) #Progress
+```
+
+#Fix tot_cabin_ppl, those that miss cabin got high tot_cabin_ppl, time to make those to NA
+```{r}
+full[full$Tot_cabin_ppl > 200, 'Tot_cabin_ppl'] <- NA
+```
+
+
+
+#Removing unnecessary columns
+```{r}
+full$HomePlanet_2 <- NULL
+full$HomePlanet_3 <- NULL
+full$HomePlanet_4 <- NULL
+```
+
+#Im to tired to keep on feature engineering so im gonna fix the rest of the variables with some mice, then im done with it!
+#AKA some predicted imputation!
+
+#I’m going to use the mice package for this task
+
+```{r}
+# Set a random seed
+set.seed(1337)
+
+# Perform mice imputation, excluding certain less-than-useful variables:
+mice_mod <- mice(full[, names(full) %in% c('Group_surname','Group','HomePlanet','CryoSleep','Destination','Age','VIP', 'RoomService',
+  'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck', 'Deck', 'Cabin_side', 'Cabin_num')], method='rf')
+#method='rf' probably means randomforest!
+```
+
+
+```{r}
+# Save the complete output 
+mice_output <- complete(mice_mod) #Here it becomes its own dataframe!
+```
+
+#Let’s compare the results we get with the original distribution of the variables
+
+```{r}
+# Plot age distributions
+par(mfrow=c(1,2))
+hist(full$Age, freq=F, main='Age: Original Data', 
+  col='darkgreen', ylim=c(0,0.04))
+hist(mice_output$Age, freq=F, main='Age: MICE Output', 
+  col='lightgreen', ylim=c(0,0.04))
+```
+
+```{r}
+# Plot roomservice distributions
+par(mfrow=c(1,2))
+hist(full$RoomService, main='RoomService: Original Data', 
+  col='darkgreen', breaks = 80, freq=F)
+hist(mice_output$RoomService, freq=F, main='RoomService: MICE Output', 
+  col='lightgreen', breaks = 80)
+```
+
+#Gonna check VIP and cryosleep aswell
+```{r}
+summary(full$CryoSleep)
+```
+
+```{r}
+summary(mice_output$CryoSleep)
+```
+```{r}
+summary(full$VIP)
+```
+
+
+```{r}
+summary(mice_output$VIP)
+```
+#Looks good tbh!
+
+```{r}
+summary(mice_output)
+```
+
+```{r}
+summary(full)
+```
+
+#What i can see, it looks cool!
+
+#Lets see Deck
+
+```{r}
+summary(full$Deck)
+```
+
+```{r}
+summary(mice_output$Deck)
+```
+
+#Everything looks fine! Now lets turn in into the full dataset!
+```{r}
+full[, names(full) %in% c('Group_surname','Group','HomePlanet','CryoSleep','Destination','Age','VIP', 'RoomService','FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck', 'Deck', 'Cabin_side', 'Cabin_num')] <- mice_output
+```
+
+
+```{r}
+#Done
+```
+
+
+```{r}
+# First we'll look at the relationship between age & transportation
+ggplot(full[!is.na(full$Transported),], aes(Age, fill = factor(Transported))) + #1 till 8693 is the training data
+  geom_histogram() + 
+  # I also include Cryosleep and VIP to see
+  facet_grid(.~CryoSleep) + #Group everything by CryoSleep
+  theme_few()
+```
+
+
+```{r}
+# First we'll look at the relationship between age & transportation
+ggplot(full[!is.na(full$Transported),], aes(Age, fill = factor(Transported))) + 
+  geom_histogram() + 
+  # I also include Cryosleep and VIP to see
+  facet_grid(.~VIP) + #Group everything by VIP
+  theme_few()
+```
+#VIP doesnt seem to matter
+
+#I can see that cryosleep matters and if its a child <10 or a teenager <20
+
+```{r}
+# First we'll look at the relationship between age & transportation
+ggplot(full[!is.na(full$Transported),], aes(Age, fill = factor(Transported))) + #1 till 8693 is the training data
+  geom_histogram() + 
+  facet_grid(.~Deck) + #Group everything by Deck
+  theme_few()
+```
+#Deck seems to matter too
+
+```{r}
+# Create the column child, and indicate whether child, teenager or adult
+full$Child[full$Age < 10] <- 'Child'
+full$Child[full$Age < 20 & full$Age >= 10] <- 'Teenager'
+full$Child[full$Age >= 20] <- 'Adult'
+
+full$Child  <- factor(full$Child)
+```
+
+
+```{r}
+#looking at the relationship between agebracket & transportation
+ggplot(full[!is.na(full$Transported),], aes(Child, fill = factor(Transported))) +
+  geom_bar() + 
+  theme_few()
+```
+#It's clear its an advantage being a child!
+
+#From earlier tries at prediction i can see that Spa, VRDeck and RoomService had the biggest importance, im gonna try and see if its possible to feature engineer it.
+#NOTE: I ended up not using these because they prediction got worse.
+#Probably because of over-fitting?
+
+
+```{r}
+ggplot(full[!is.na(full$Transported),], aes(Spa, fill = factor(Transported))) +
+  geom_histogram() +
+  scale_x_continuous(limits = c(NA, 50)) +
+  theme_few()
+```
+#Looks like i can make a categorical variable that says if the person spent money more than 5 on the spa or not
+
+```{r}
+full$Spa_dummy <- NA
+full[full$Spa > 5, 'Spa_dummy'] <- 1
+full[full$Spa <= 5, 'Spa_dummy'] <- 0
+```
+
+
+```{r}
+# Lets now see VRDeck
+ggplot(full[!is.na(full$Transported),], aes(VRDeck, fill = factor(Transported))) +
+  geom_histogram() +
+  scale_x_continuous(limits = c(NA, 10)) +
+  theme_few()
+
+```
+#Seems to be a pattern here!
+#From playing around with the graph, it seems like a person gets punished if they spend more than 5 at the VRDeck.
+
+```{r}
+full$VRDeck_dummy <- NA
+full[full$VRDeck > 5, 'VRDeck_dummy'] <- 1
+full[full$VRDeck <= 5, 'VRDeck_dummy'] <- 0
+```
+
+```{r}
+# Lets now see RoomService
+ggplot(full[!is.na(full$Transported),], aes(RoomService, fill = factor(Transported))) +
+  geom_histogram() +
+  scale_x_continuous(limits = c(NA, 10)) +
+  theme_few()
+```
+#Here it seems like spending any money at all gets punished!
+
+```{r}
+full$RoomService_dummy <- NA
+full[full$RoomService > 0, 'RoomService_dummy'] <- 1
+full[full$RoomService == 0, 'RoomService_dummy'] <- 0
+```
+
+```{r}
+summary(full$Probtotfam)
+```
+
+
+```{r}
+summary(full$Cabin_num) #Need to fix these in imputation #UPDATE FIXED
+```
+
+#Splitting the data back into the original test and training sets.
+
+```{r}
+# Split the data back into a train set and a test set
+test <- full[is.na(full$Transported),]
+train <- full[!is.na(full$Transported),]
+```
+
+
+```{r}
+#Splitting the train set into training_train set and training_test set
+library(caTools)
+
+split <- sample.split(train$Transported, SplitRatio = 0.8)
+training_train <- subset(train, split == TRUE)
+training_test <- subset(train, split == FALSE)
+```
+
+
+```{r}
+# Setting a random seed
+set.seed(1337)
+
+# Building the model
+rf_model <- randomForest(factor(Transported) ~ CryoSleep + Deck + Age + HomePlanet +    
+                                            RoomService + FoodCourt + ShoppingMall + 
+                                            Spa + VRDeck + VIP + Num_in_group +
+                                            Cabin_side + Destination + Child + Probtotfam +
+                                            Cabin_num + Num_in_group + Totalgrp, 
+                                            data = training_train, ntree = 5000, 
+                                            nodesize = 8)
+
+```
+
+#Let’s look at relative variable importance by plotting the mean decrease in Gini calculated across all trees.
+
+```{r}
+# Getting importance
+importance    <- importance(rf_model)
+varImportance <- data.frame(Variables = row.names(importance), 
+                            Importance = round(importance[ ,'MeanDecreaseGini'],2))
+
+# Creating a rank variable based on importance
+rankImportance <- varImportance %>%
+  mutate(Rank = paste0('#',rank(desc(Importance))))
+
+# Using ggplot2 to visualize the relative importance of variables
+ggplot(rankImportance, aes(x = reorder(Variables, Importance), #Reorder makes lowest best or "highest"
+    y = Importance, fill = Importance)) +
+  geom_bar(stat='identity') + 
+  geom_text(aes(x = Variables, y = 0.5, label = Rank),
+    hjust=0, vjust=0.55, size = 4, colour = 'red') +
+  labs(x = 'Variables') +
+  coord_flip() + 
+  theme_few()
+```
+
+```{r}
+training_prediction <- predict(rf_model, training_test) #Predicting my 
+```
+
+```{r}
+# Saving the solution to a dataframe with two columns: PassengerId and Survived (prediction)
+training_solution <- data.frame(PassengerId = training_test$PassengerId, 
+                                Transported = training_prediction)
+```
+
+
+```{r}
+training_test_compare <- training_test %>% #This is what i compare my solution, for finetune
+  select(c('PassengerId', 'Transported'))
+
+training_test_compare$Rank <- rank(training_test_compare$PassengerId)
+
+training_test_compare <- training_test_compare %>%
+  arrange(Rank)
+```
+
+
+```{r}
+training_solution$Rank <- rank(training_solution$PassengerId)
+
+training_solution <- training_solution %>%
+  arrange(Rank)
+
+rownames(training_solution) <- 1:nrow(training_solution) #Resetting index
+```
+
+
+```{r}
+
+result <- 0
+for(i in 1:nrow(training_solution)){
+  if(training_solution$Transported[[i]][1] != training_test_compare$Transported[[i]][1]){
+    result <- result + 1
+  }
+}
+
+print(1 - result/nrow(training_solution))
+```
+
+#v16 80.1%!
+
+
+```{r}
+# Setting a random seed
+set.seed(1337)
+
+# Building the model
+rf_model <- randomForest(factor(Transported) ~ CryoSleep + Deck + Age + HomePlanet +    
+                                            RoomService + FoodCourt + ShoppingMall + 
+                                            Spa + VRDeck + VIP + Num_in_group +
+                                            Cabin_side + Destination + Child + Probtotfam +
+                                            Cabin_num + Num_in_group + Totalgrp, 
+                                            data = train, ntree = 5000, 
+                                            nodesize = 8)
+
+#After some experiments, this is my 16th version.
+```
+
+#Real and final prediction!
+```{r}
+# Predict using the test set
+prediction <- predict(rf_model, test)
+
+# Save the solution to a dataframe with two columns: PassengerId and Survived (prediction)
+solution <- data.frame(PassengerId = test$PassengerId, Transported = prediction)
+
+# Writing the solution to file
+write.csv(solution, file = 'finalprediction.csv', row.names = F)
+```
+
+#kaggle score: 0.80313
